@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { defineConfig } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 
 // Cross-origin isolation helps ONNX Runtime Web use SharedArrayBuffer / multi-threaded WASM.
@@ -31,14 +31,14 @@ const APP_VERSION = pkg.version;
 const BUILD_ID = resolveBuildId();
 
 /** Emits dist/build-info.json so the host sync script can label the artifact. */
-function buildInfoPlugin() {
+function buildInfoPlugin(): Plugin {
   return {
     name: 'ws-speech-text-build-info',
-    generateBundle(this: {emitFile: (file: Record<string, string>) => void}) {
+    generateBundle() {
       this.emitFile({
         type: 'asset',
         fileName: 'build-info.json',
-        source: `${JSON.stringify({version: APP_VERSION, buildId: BUILD_ID}, null, 2)}\n`,
+        source: `${JSON.stringify({ version: APP_VERSION, buildId: BUILD_ID }, null, 2)}\n`,
       });
     },
   };
