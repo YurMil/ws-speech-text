@@ -32,9 +32,10 @@ export function getProfile(profileId: string): ModelProfile | undefined {
   return MODEL_PROFILES.find((profile) => profile.id === profileId);
 }
 
+/** Decimal units, so the size shown matches how downloads are quoted. */
 export function formatBytes(bytes: number): string {
-  if (bytes < 1024 * 1024) {
-    return `${Math.round(bytes / 1024)} KB`;
+  if (bytes < 1_000_000) {
+    return `${Math.round(bytes / 1000)} KB`;
   }
-  return `${(bytes / (1024 * 1024)).toFixed(0)} MB`;
+  return `${(bytes / 1_000_000).toFixed(0)} MB`;
 }
