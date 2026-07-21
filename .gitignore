@@ -1,0 +1,26 @@
+node_modules/
+dist/
+coverage/
+.vite/
+.cache/
+*.log
+.env
+.env.*
+!.env.example
+
+# User content and local model data
+*.wav
+*.mp3
+*.m4a
+*.aac
+*.ogg
+*.webm
+*.flac
+models/
+benchmarks/private/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
