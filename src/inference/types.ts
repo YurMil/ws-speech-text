@@ -134,9 +134,10 @@ export type ModelProfile = {
   modelId: string;
   revision: string;
   multilingual: boolean;
-  approximateDownloadBytes: number;
   devices: Array<'wasm' | 'webgpu'>;
-  dtypeByDevice: Partial<Record<'wasm' | 'webgpu', string>>;
+  dtypeByDevice: Record<'wasm' | 'webgpu', string>;
+  /** First-use download per device — the dtypes differ, so one number cannot serve both. */
+  downloadBytesByDevice: Record<'wasm' | 'webgpu', number>;
   chunkLengthSeconds: number;
   strideLengthSeconds: number;
   maxDurationSeconds: number;

@@ -16,6 +16,7 @@ const DIST_DIR = path.resolve(process.argv[2] ?? path.join(ROOT, 'dist'));
 
 const ALLOWED_EXTENSIONS = new Set(['.js', '.css', '.wasm', '.json', '.html', '.mjs']);
 const FORBIDDEN_PATTERNS = [/localhost/i, /127\.0\.0\.1/, /\/@vite\//, /sourceMappingURL/i];
+const ALLOWLIST_PATH = path.join(ROOT, 'scripts', 'allowed-external-origins.json');
 
 const problems = [];
 
@@ -51,6 +52,58 @@ function collectFiles(rootDir) {
   return files.sort();
 }
 
+/**
+ * Nothing in the bundle may reach a third party.
+ *
+ * A stylesheet that @imports a web font passes every other check here — it is
+ * valid CSS, referenced from a packaged file — yet it is blocked by the host CSP
+ * and announces the visitor's IP to whoever serves it. So:
+ *
+ *   CSS: any absolute http(s) URL fails. There is no legitimate reason for one,
+ *        and the check has no false positives.
+ *   JS:  a bundled library's error strings and doc links contain URLs it never
+ *        requests, so a plain match would be noise. Instead the set of origins
+ *        is ratcheted against a reviewed allowlist: known-inert ones pass, a new
+ *        one fails until somebody writes down why it is there.
+ */
+function checkExternalReferences(files) {
+  const allowlist = JSON.parse(fs.readFileSync(ALLOWLIST_PATH, 'utf8')).origins ?? {};
+  const seen = new Map();
+
+  for (const relative of files) {
+    const extension = path.extname(relative).toLowerCase();
+    if (extension !== '.css' && extension !== '.js' && extension !== '.mjs') continue;
+
+    const contents = fs.readFileSync(path.join(DIST_DIR, relative), 'utf8');
+    const urls = contents.match(/https?:\/\/[a-zA-Z0-9.-]+/g) ?? [];
+
+    // Report each origin once per file, however many times it occurs.
+    const reported = new Set();
+
+    for (const url of urls) {
+      const origin = url.replace(/^http:/, 'https:');
+      if (extension === '.css') {
+        if (reported.has(origin)) continue;
+        reported.add(origin);
+        problems.push(`stylesheet reaches a third party: ${relative} -> ${origin}`);
+        continue;
+      }
+      if (!(origin in allowlist) && !reported.has(origin)) {
+        reported.add(origin);
+        problems.push(
+          `unreviewed external origin in ${relative}: ${origin}\n` +
+            `      If the bundle never requests it, record why in scripts/allowed-external-origins.json.`,
+        );
+      }
+      seen.set(origin, (seen.get(origin) ?? 0) + 1);
+    }
+  }
+
+  for (const [origin, count] of [...seen].sort()) {
+    console.log(`[verify-artifact] external origin present: ${origin} (${count}x, allowlisted)`);
+  }
+}
+
 function main() {
   if (!fs.existsSync(path.join(DIST_DIR, 'index.html'))) {
     problems.push(`missing entry: ${path.join(DIST_DIR, 'index.html')}`);
@@ -80,6 +133,8 @@ function main() {
       problems.push(`entry HTML references an unpackaged asset: ${reference}`);
     }
   }
+
+  checkExternalReferences(files);
 
   // The host manifest is built from these fields; without them it refuses the
   // artifact, so catch it here instead.

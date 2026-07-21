@@ -1,5 +1,6 @@
 import { env, pipeline, type AutomaticSpeechRecognitionPipeline } from '@huggingface/transformers';
 import { getProfile } from '../inference/profiles';
+import { autoMayUseWebGpu, probeWebGpu } from '../platform/environment';
 import type {
   ProgressEvent,
   RuntimeDiagnostics,
@@ -101,18 +102,31 @@ async function createPipeline(
   postProgress(requestId, { phase: 'manifest', status: 'completed', ratio: 1 });
   postProgress(requestId, { phase: 'runtime-init', status: 'started' });
 
-  const webGpuAvailable =
-    typeof navigator !== 'undefined' && 'gpu' in navigator;
-  const tryWebGpu =
-    runtimePreference === 'webgpu' || (runtimePreference === 'auto' && webGpuAvailable);
+  // Only ask the platform about the GPU when it could actually be used —
+  // requesting an adapter during a plain WASM run is wasted work and would
+  // otherwise leave a misleading fallback reason in the diagnostics.
+  let tryWebGpu = false;
 
-  if (runtimePreference === 'webgpu' && !webGpuAvailable) {
-    throw makeError('RUNTIME_UNSUPPORTED', 'prepare', true, true);
+  if (runtimePreference !== 'wasm') {
+    if (runtimePreference === 'auto' && !autoMayUseWebGpu()) {
+      fallbackReasonCode = 'WEBGPU_MOBILE_POLICY';
+    } else {
+      const probe = await probeWebGpu();
+      if (probe.usable) {
+        tryWebGpu = true;
+      } else {
+        fallbackReasonCode = probe.rejection;
+      }
+    }
   }
+
+  // An explicit WebGPU preference is a preference, not a demand: WASM stays a
+  // supported path on every device, so an unusable GPU degrades instead of
+  // failing the request.
 
   const load = async (device: 'wasm' | 'webgpu') => {
     const dtype = (profile.dtypeByDevice[device] ??
-      (device === 'webgpu' ? 'fp32' : 'q8')) as 'fp32' | 'fp16' | 'q8' | 'q4' | 'int8';
+      (device === 'webgpu' ? 'fp16' : 'q8')) as 'fp32' | 'fp16' | 'q8' | 'q4' | 'int8';
     return pipeline('automatic-speech-recognition', profile.modelId, {
       revision: profile.revision,
       device,

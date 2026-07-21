@@ -7,7 +7,12 @@ import type {
   TranscriptResult,
   TranscriptSegment,
 } from '../inference/types';
-import { AUDIO_LIMITS, throwIfAborted, yieldToMain } from './limits';
+import {
+  throwIfAborted,
+  yieldToMain,
+  getWindowSeconds,
+  getOverlapSeconds,
+} from './limits';
 import { iterateAudioWindows } from './mediaProbe';
 import { analyzeLevels } from './normalize';
 
@@ -81,7 +86,8 @@ function joinTexts(parts: string[]): string {
 export async function transcribeMediaConveyor(
   options: ConveyorOptions,
 ): Promise<TranscriptResult> {
-  const overlapSeconds = AUDIO_LIMITS.overlapSeconds;
+  const windowSeconds = getWindowSeconds();
+  const overlapSeconds = getOverlapSeconds();
   const warnings: string[] = [];
   const textParts: string[] = [];
   let segments: TranscriptSegment[] = [];
@@ -92,6 +98,8 @@ export async function transcribeMediaConveyor(
     options.timestamps === 'none' ? 'segment' : options.timestamps;
 
   for await (const window of iterateAudioWindows(options.blob, {
+    windowSeconds,
+    overlapSeconds,
     signal: options.signal,
   })) {
     throwIfAborted(options.signal);

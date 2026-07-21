@@ -5,7 +5,14 @@ import {
   Input,
   InputDisposedError,
 } from 'mediabunny';
-import { AUDIO_LIMITS, AudioPipelineError, throwIfAborted } from './limits';
+import {
+  AUDIO_LIMITS,
+  AudioPipelineError,
+  throwIfAborted,
+  getInlineDecodeMaxSeconds,
+  getWindowSeconds,
+  getOverlapSeconds,
+} from './limits';
 import {
   assertFiniteSamples,
   clampSamples,
@@ -51,7 +58,7 @@ export function guessMediaKind(file: Blob & { name?: string; type?: string }): M
 
 export function shouldUseConveyor(probe: MediaProbe, kind: MediaKind): boolean {
   if (kind === 'video') return true;
-  if (probe.durationSeconds > AUDIO_LIMITS.inlineDecodeMaxSeconds) return true;
+  if (probe.durationSeconds > getInlineDecodeMaxSeconds()) return true;
   if (probe.byteLength > AUDIO_LIMITS.inlineDecodeMaxBytes) return true;
   return false;
 }
@@ -164,8 +171,8 @@ export async function* iterateAudioWindows(
     signal?: AbortSignal;
   },
 ): AsyncGenerator<ExtractedWindow> {
-  const windowSeconds = options?.windowSeconds ?? AUDIO_LIMITS.windowSeconds;
-  const overlapSeconds = options?.overlapSeconds ?? AUDIO_LIMITS.overlapSeconds;
+  const windowSeconds = options?.windowSeconds ?? getWindowSeconds();
+  const overlapSeconds = options?.overlapSeconds ?? getOverlapSeconds();
   const step = Math.max(1, windowSeconds - overlapSeconds);
 
   const input = await openInput(blob);

@@ -14,11 +14,14 @@ export const MODEL_PROFILES: readonly ModelProfile[] = [
     modelId: 'onnx-community/whisper-tiny',
     revision: 'ff4177021cc41f7db950912b73ea4fdf7d01d8e7',
     multilingual: true,
-    approximateDownloadBytes: 77_000_000,
     devices: ['wasm', 'webgpu'],
     dtypeByDevice: {
       wasm: 'q8',
-      webgpu: 'fp32',
+      webgpu: 'fp16',
+    },
+    downloadBytesByDevice: {
+      wasm: 41_000_000,
+      webgpu: 77_000_000,
     },
     chunkLengthSeconds: 30,
     strideLengthSeconds: 5,
@@ -39,3 +42,12 @@ export function formatBytes(bytes: number): string {
   }
   return `${(bytes / 1_000_000).toFixed(0)} MB`;
 }
+
+/**
+ * Bytes fetched on first use for a given device. The weights differ per dtype,
+ * so quoting one number for both runtimes would always be wrong for one of them.
+ */
+export function downloadBytesFor(profile: ModelProfile, device: 'wasm' | 'webgpu'): number {
+  return profile.downloadBytesByDevice[device];
+}
+
