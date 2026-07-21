@@ -1,11 +1,22 @@
 # Client-Side Whisper Transcriber
 
-**Status:** proposed architecture and implementation specification  
+**Status:** minimal prototype + architecture specification  
 **Source repository:** `YurMil/ws-speech-text`  
 **Integration target:** `YurMil/cadautoscript.com`  
 **Planned public route:** `/utilities/whisper-transcriber/`
 
 This repository defines a production-grade, fully client-side speech-to-text application built with Vite, React, TypeScript, Transformers.js, ONNX Runtime Web, Web Workers, WASM, and optional WebGPU acceleration.
+
+## Run the prototype
+
+```bash
+pnpm install
+pnpm dev
+```
+
+Open the printed local URL. First transcription downloads the multilingual Whisper tiny ONNX model from Hugging Face Hub (~77 MB) and caches it in the browser.
+
+**Large audio/video:** files are probed with Mediabunny, then transcribed in a conveyor of ~30s mono 16 kHz windows (5s overlap). Only one PCM window is held at a time; the Worker keeps a single prepared model across windows. Short clips still use a one-shot decode path.
 
 Audio decoding, normalization, inference, transcript formatting, and export run in the browser. No transcription backend is required. The built application is published as a versioned static artifact and embedded into CAD AutoScript through its existing same-origin utility iframe architecture.
 
