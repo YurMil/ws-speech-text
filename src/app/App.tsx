@@ -756,7 +756,7 @@ export function App() {
           <span>runtime: {diagnostics?.effectiveRuntime ?? '—'}</span>
           <span>requested: {diagnostics?.requestedRuntime ?? runtimePreference}</span>
           <span>prep: {diagnostics?.preparationMs != null ? `${diagnostics.preparationMs} ms` : '—'}</span>
-          <span>build: 0.1.0-prototype</span>
+          <span>build: {__APP_VERSION__} · {__BUILD_ID__}</span>
         </div>
       </section>
     </main>

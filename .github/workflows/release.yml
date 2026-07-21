@@ -1,0 +1,141 @@
+name: Release
+
+# Tag a release to publish the transcriber:
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# This builds the bundle, verifies it, attaches a checksummed archive to a
+# GitHub release, and notifies cadautoscript.com, which opens a pull request
+# republishing the artifact. The host never builds this app itself and never
+# downloads model weights.
+#
+# Required secret: SITE_DISPATCH_TOKEN — a fine-grained PAT scoped to
+# YurMil/cadautoscript.com with "Contents: read and write" permission, used
+# only to send the repository_dispatch event. Without it the release still
+# succeeds and the host sync can be started manually from the Actions tab.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build and release
+        required: true
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      SITE_REPOSITORY: YurMil/cadautoscript.com
+      # Read into env so the notify step can test it — the secrets context is
+      # not available in step-level `if` conditions.
+      SITE_DISPATCH_TOKEN: ${{ secrets.SITE_DISPATCH_TOKEN }}
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          # The build id comes from `git rev-parse HEAD`, so this must be a real
+          # repository rather than an export.
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v6
+        # version is taken from "packageManager" in package.json
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Build
+        run: pnpm build
+
+      - name: Verify the artifact is publishable
+        run: pnpm verify
+
+      - name: Package archive
+        id: package
+        run: |
+          set -euo pipefail
+          archive="whisper-transcriber-${TAG}.zip"
+          # Zip the contents of dist/, not the directory itself: the host sync
+          # accepts either layout, and a flat archive is easier to inspect.
+          (cd dist && zip -qr "../${archive}" .)
+          sha256sum "${archive}" > "${archive}.sha256"
+          sha256="$(cut -d' ' -f1 < "${archive}.sha256")"
+          {
+            echo "archive=${archive}"
+            echo "sha256=${sha256}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Packaged ${archive} ($(stat -c%s "${archive}") bytes), sha256 ${sha256}"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+          SHA256: ${{ steps.package.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          build_id="$(node -p "require('./dist/build-info.json').buildId")"
+          {
+            printf 'Static artifact for the CAD AutoScript Whisper Transcriber utility.\n\n'
+            printf '| | |\n|---|---|\n'
+            printf '| Archive | `%s` |\n' "$ARCHIVE"
+            printf '| SHA-256 | `%s` |\n' "$SHA256"
+            printf '| Build id | `%s` |\n\n' "$build_id"
+            printf 'Published by cadautoscript.com with:\n\n'
+            printf '```\nnode scripts/sync-whisper-transcriber.mjs --archive %s --sha256 %s\n```\n' \
+              "$ARCHIVE" "$SHA256"
+          } > release-notes.md
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$ARCHIVE" "$ARCHIVE.sha256" --clobber
+          else
+            gh release create "$TAG" "$ARCHIVE" "$ARCHIVE.sha256" \
+              --title "Whisper Transcriber $TAG" --notes-file release-notes.md
+          fi
+
+      - name: Notify cadautoscript.com
+        if: env.SITE_DISPATCH_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ env.SITE_DISPATCH_TOKEN }}
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+          SHA256: ${{ steps.package.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg tag "$TAG" \
+            --arg archive "$ARCHIVE" \
+            --arg sha256 "$SHA256" \
+            '{event_type: "whisper-transcriber-release",
+              client_payload: {tag: $tag, archive: $archive, sha256: $sha256}}' \
+            | gh api "repos/${SITE_REPOSITORY}/dispatches" --input -
+          echo "Dispatched whisper-transcriber-release (${TAG}) to ${SITE_REPOSITORY}"
+
+      - name: Summary
+        run: |
+          {
+            echo "### Whisper Transcriber ${TAG}"
+            echo
+            echo "- archive: \`${{ steps.package.outputs.archive }}\`"
+            echo "- sha256: \`${{ steps.package.outputs.sha256 }}\`"
+            if [ -z "${SITE_DISPATCH_TOKEN}" ]; then
+              echo "- host sync: **not dispatched** (SITE_DISPATCH_TOKEN is not set)"
+            else
+              echo "- host sync: dispatched to ${SITE_REPOSITORY}"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

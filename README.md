@@ -11,7 +11,9 @@ This repository defines a production-grade, fully client-side speech-to-text app
 
 ```bash
 pnpm install
-pnpm dev
+pnpm dev        # development server
+pnpm build      # production bundle in dist/
+pnpm verify     # audit dist/ the way the publishing host will
 ```
 
 Open the printed local URL. First transcription downloads the multilingual Whisper tiny ONNX model from Hugging Face Hub (~77 MB) and caches it in the browser.
@@ -117,35 +119,42 @@ ws-speech-text/
 9. CAD AutoScript never bundles Transformers.js or model weights into its main Docusaurus bundle.
 10. A release is not public until browser, privacy, accessibility, performance, CSP, Permissions Policy, and rollback gates pass.
 
-## Important host integration blockers
+## Host integration status
 
-The current CAD AutoScript host configuration must be changed before microphone release:
+These host-side prerequisites are addressed by the CAD AutoScript publication change:
 
-- global `Permissions-Policy` currently denies microphone access;
-- the iframe currently delegates camera only;
-- remote Hugging Face model origins are not currently allowed by `connect-src`;
-- capability delegation should become per utility rather than globally granting microphone access.
+- capability delegation is now per utility (`UtilityPageConfig.iframeAllow`), and the transcriber is the only utility that receives `microphone 'self'`;
+- `Permissions-Policy` is relaxed to `microphone=(self)` only on `/utilities/whisper-transcriber/*` and `/utility-apps/whisper-transcriber/*`; the site default stays `microphone=()`;
+- `connect-src` allows the Hugging Face Hub origins the pinned model is fetched from.
 
-The preferred production model-delivery option is a controlled, versioned first-party origin. Remote Hub delivery may be used only with immutable revisions, an exact CSP/CORS allowlist, verified redirects, and tested rollback behavior.
+Model delivery uses the Hub with an immutable revision pinned in `src/inference/profiles.ts`. A controlled first-party origin remains the preferred long-term option; the pin, the CSP allowlist, and the artifact manifest are what make the current arrangement rollback-safe.
 
-## Release artifact
+## Release and publication pipeline
 
-A release should contain:
+Tagging a release publishes the utility end to end:
 
-```text
-app.html
-assets/*
-artifact-manifest.json
-checksums.json
-sbom.spdx.json
-LICENSES/
+```bash
+git tag v0.1.0
+git push origin v0.1.0
 ```
 
-The CAD AutoScript sync process downloads a pinned release archive, verifies SHA-256 checksums, rejects unsafe paths and development URLs, and atomically publishes the artifact under:
+1. `.github/workflows/release.yml` builds the bundle, runs `scripts/verify-artifact.mjs`, packages `whisper-transcriber-<tag>.zip`, and attaches it to a GitHub release together with its SHA-256.
+2. It then sends a `whisper-transcriber-release` `repository_dispatch` to `YurMil/cadautoscript.com` using the `SITE_DISPATCH_TOKEN` secret.
+3. That repository's `sync-whisper-transcriber` workflow downloads the archive, refuses it unless the checksum matches, re-audits every file, republishes `static/utility-apps/whisper-transcriber/`, runs typecheck/lint/build, and opens a pull request.
+
+The host never builds this app and never downloads model weights. If the secret is absent the release still succeeds and the host sync can be started manually from its Actions tab with the tag.
+
+### Artifact contents
 
 ```text
-static/utility-apps/whisper-transcriber/
+app.html          # entry the utility shell iframes
+index.html        # same document, so the directory URL also works
+assets/*          # hashed JS, CSS and the ONNX Runtime WASM
+build-info.json   # version, git build id, build time
+manifest.json     # written by the host: entry, asset list, SHA-256 per file
 ```
+
+`scripts/verify-artifact.mjs` runs the same audit the host applies — no symlinks, no path traversal, no source maps, no development references, and the entry document may only reference packaged relative assets — so a bad bundle fails here rather than in the host pipeline.
 
 ## Definition of done
 
