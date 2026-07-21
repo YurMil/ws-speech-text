@@ -3,12 +3,9 @@ import { readFileSync } from 'node:fs';
 import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 
-// Cross-origin isolation helps ONNX Runtime Web use SharedArrayBuffer / multi-threaded WASM.
-// credentialless allows Hub model fetches while still enabling SharedArrayBuffer.
-const isolationHeaders = {
-  'Cross-Origin-Opener-Policy': 'same-origin',
-  'Cross-Origin-Embedder-Policy': 'credentialless',
-};
+// Cross-origin isolation headers are commented out to avoid breaking third-party embedding.
+// This forces single-threaded WASM on platforms without COOP/COEP isolation.
+const isolationHeaders = {};
 
 const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')) as {
   version: string;

@@ -518,13 +518,26 @@ export function App() {
 
   return (
     <main className="shell">
-      <header className="brand">
-        <h1>Whisper Transcriber</h1>
-        <p>
-          Private speech-to-text in your browser. Audio and video are processed in a windowed
-          conveyor (mono 16 kHz chunks) so large files do not load full PCM into memory. The model
-          stays resident across windows.
-        </p>
+      <header className="brand" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '1rem' }}>
+        <div style={{ flex: '1 1 400px' }}>
+          <h1>Whisper Transcriber</h1>
+          <p>
+            Private speech-to-text in your browser. Audio and video are processed in a windowed
+            conveyor (mono 16 kHz chunks) so large files do not load full PCM into memory. The model
+            stays resident across windows.
+          </p>
+        </div>
+        <button
+          type="button"
+          className="btn secondary"
+          style={{ borderRadius: '20px', fontSize: '0.8rem', padding: '0.4rem 0.85rem' }}
+          onClick={() => {
+            localStorage.setItem('ui-mode', 'minimal');
+            window.location.reload();
+          }}
+        >
+          Minimalist MD3 UI
+        </button>
       </header>
 
       <section className="panel" aria-labelledby="input-heading">

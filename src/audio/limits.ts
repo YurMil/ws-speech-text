@@ -1,3 +1,5 @@
+import { isMobileUA } from '../inference/profiles';
+
 export const AUDIO_LIMITS = {
   /** Hard cap on uploaded container size (audio/video). Decoding stays windowed. */
   maxSourceBytes: 2 * 1024 * 1024 * 1024,
@@ -14,6 +16,18 @@ export const AUDIO_LIMITS = {
   /** Pause between windows so UI/GC can breathe. */
   interChunkYieldMs: 16,
 } as const;
+
+export function getInlineDecodeMaxSeconds(): number {
+  return isMobileUA() ? 30 : AUDIO_LIMITS.inlineDecodeMaxSeconds;
+}
+
+export function getWindowSeconds(): number {
+  return isMobileUA() ? 15 : AUDIO_LIMITS.windowSeconds;
+}
+
+export function getOverlapSeconds(): number {
+  return isMobileUA() ? 3 : AUDIO_LIMITS.overlapSeconds;
+}
 
 export type NormalizedAudio = {
   samples: Float32Array;

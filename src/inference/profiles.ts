@@ -18,7 +18,11 @@ export const MODEL_PROFILES: readonly ModelProfile[] = [
     devices: ['wasm', 'webgpu'],
     dtypeByDevice: {
       wasm: 'q8',
-      webgpu: 'fp32',
+      webgpu: 'fp16',
+    },
+    downloadBytesByDevice: {
+      wasm: 41_000_000,
+      webgpu: 77_000_000,
     },
     chunkLengthSeconds: 30,
     strideLengthSeconds: 5,
@@ -39,3 +43,16 @@ export function formatBytes(bytes: number): string {
   }
   return `${(bytes / 1_000_000).toFixed(0)} MB`;
 }
+
+/**
+ * Robust User Agent detection to identify mobile/iOS platforms.
+ */
+export function isMobileUA(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent || '';
+  const isIOS = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const isAndroid = /Android/i.test(ua);
+  const isMobileDevice = /Mobi|Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
+  return isIOS || isAndroid || isMobileDevice;
+}
+

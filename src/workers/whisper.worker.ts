@@ -1,5 +1,5 @@
 import { env, pipeline, type AutomaticSpeechRecognitionPipeline } from '@huggingface/transformers';
-import { getProfile } from '../inference/profiles';
+import { getProfile, isMobileUA } from '../inference/profiles';
 import type {
   ProgressEvent,
   RuntimeDiagnostics,
@@ -101,10 +101,33 @@ async function createPipeline(
   postProgress(requestId, { phase: 'manifest', status: 'completed', ratio: 1 });
   postProgress(requestId, { phase: 'runtime-init', status: 'started' });
 
-  const webGpuAvailable =
-    typeof navigator !== 'undefined' && 'gpu' in navigator;
+  let webGpuAvailable = false;
+
+  if (typeof navigator !== 'undefined' && 'gpu' in navigator) {
+    try {
+      const adapter = await (navigator as any).gpu.requestAdapter();
+      if (!adapter) {
+        fallbackReasonCode = 'WEBGPU_NO_ADAPTER';
+      } else {
+        const limit = adapter.limits?.maxStorageBufferBindingSize ?? 0;
+        const MIN_REQUIRED_LIMIT = 128 * 1024 * 1024; // 128MB
+        if (limit < MIN_REQUIRED_LIMIT) {
+          fallbackReasonCode = `WEBGPU_BUFFER_LIMIT_LOW_${Math.round(limit / (1024 * 1024))}MB`;
+        } else {
+          webGpuAvailable = true;
+        }
+      }
+    } catch {
+      fallbackReasonCode = 'WEBGPU_ADAPTER_ERROR';
+    }
+  } else {
+    fallbackReasonCode = 'WEBGPU_API_MISSING';
+  }
+
+  const isMobile = isMobileUA();
   const tryWebGpu =
-    runtimePreference === 'webgpu' || (runtimePreference === 'auto' && webGpuAvailable);
+    runtimePreference === 'webgpu' ||
+    (runtimePreference === 'auto' && !isMobile && webGpuAvailable);
 
   if (runtimePreference === 'webgpu' && !webGpuAvailable) {
     throw makeError('RUNTIME_UNSUPPORTED', 'prepare', true, true);
@@ -112,7 +135,7 @@ async function createPipeline(
 
   const load = async (device: 'wasm' | 'webgpu') => {
     const dtype = (profile.dtypeByDevice[device] ??
-      (device === 'webgpu' ? 'fp32' : 'q8')) as 'fp32' | 'fp16' | 'q8' | 'q4' | 'int8';
+      (device === 'webgpu' ? 'fp16' : 'q8')) as 'fp32' | 'fp16' | 'q8' | 'q4' | 'int8';
     return pipeline('automatic-speech-recognition', profile.modelId, {
       revision: profile.revision,
       device,

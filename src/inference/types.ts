@@ -136,7 +136,8 @@ export type ModelProfile = {
   multilingual: boolean;
   approximateDownloadBytes: number;
   devices: Array<'wasm' | 'webgpu'>;
-  dtypeByDevice: Partial<Record<'wasm' | 'webgpu', string>>;
+  dtypeByDevice: Record<'wasm' | 'webgpu', string>;
+  downloadBytesByDevice: Record<'wasm' | 'webgpu', number>;
   chunkLengthSeconds: number;
   strideLengthSeconds: number;
   maxDurationSeconds: number;
