@@ -14,7 +14,6 @@ export const MODEL_PROFILES: readonly ModelProfile[] = [
     modelId: 'onnx-community/whisper-tiny',
     revision: 'ff4177021cc41f7db950912b73ea4fdf7d01d8e7',
     multilingual: true,
-    approximateDownloadBytes: 77_000_000,
     devices: ['wasm', 'webgpu'],
     dtypeByDevice: {
       wasm: 'q8',
@@ -45,14 +44,10 @@ export function formatBytes(bytes: number): string {
 }
 
 /**
- * Robust User Agent detection to identify mobile/iOS platforms.
+ * Bytes fetched on first use for a given device. The weights differ per dtype,
+ * so quoting one number for both runtimes would always be wrong for one of them.
  */
-export function isMobileUA(): boolean {
-  if (typeof navigator === 'undefined') return false;
-  const ua = navigator.userAgent || '';
-  const isIOS = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-  const isAndroid = /Android/i.test(ua);
-  const isMobileDevice = /Mobi|Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
-  return isIOS || isAndroid || isMobileDevice;
+export function downloadBytesFor(profile: ModelProfile, device: 'wasm' | 'webgpu'): number {
+  return profile.downloadBytesByDevice[device];
 }
 

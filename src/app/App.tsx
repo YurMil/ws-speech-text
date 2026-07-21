@@ -1,5 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
-import { AUDIO_LIMITS, AudioPipelineError } from '../audio/limits';
+import {
+  AUDIO_LIMITS,
+  AudioPipelineError,
+  effectiveAudioLimits,
+  getInlineDecodeMaxSeconds,
+} from '../audio/limits';
 import { transcribeMediaConveyor, type ConveyorProgress } from '../audio/conveyor';
 import {
   guessMediaKind,
@@ -15,7 +20,19 @@ import {
   toTxt,
   toWebVtt,
 } from '../export/formats';
-import { DEFAULT_PROFILE_ID, formatBytes, getProfile, MODEL_PROFILES } from '../inference/profiles';
+import {
+  DEFAULT_PROFILE_ID,
+  downloadBytesFor,
+  formatBytes,
+  getProfile,
+  MODEL_PROFILES,
+} from '../inference/profiles';
+import {
+  autoMayUseWebGpu,
+  isMobileUA,
+  probeWebGpu,
+  type WebGpuProbe,
+} from '../platform/environment';
 import { inferenceClient } from '../inference/requestManager';
 import type {
   LanguageOption,
@@ -59,6 +76,12 @@ type ConveyorSession = {
 
 type MediaSession = InlineSession | ConveyorSession;
 
+/** Minimal shape of a WakeLockSentinel — the DOM lib does not ship it everywhere. */
+type WakeLockLike = {
+  release(): Promise<void>;
+  addEventListener?(type: 'release', listener: () => void): void;
+};
+
 function progressLabel(
   progress: ProgressEvent | null,
   conveyor: ConveyorProgress | null,
@@ -66,7 +89,7 @@ function progressLabel(
   if (conveyor) {
     return conveyor.message;
   }
-  if (!progress) return 'Working…';
+  if (!progress) return 'Processing…';
   switch (progress.phase) {
     case 'download':
       if (progress.ratio != null) {
@@ -84,7 +107,7 @@ function progressLabel(
     case 'finalize':
       return 'Finalizing…';
     default:
-      return 'Working…';
+      return 'Processing…';
   }
 }
 
@@ -100,27 +123,35 @@ function formatClock(seconds: number): string {
 }
 
 export function App() {
+  const isMobile = useMemo(() => isMobileUA(), []);
+  
   const [phase, setPhase] = useState<Phase>('idle');
   const [language, setLanguage] = useState<LanguageOption>('auto');
   const [timestamps, setTimestamps] = useState<TimestampsOption>('segment');
-  const [runtimePreference, setRuntimePreference] = useState<RuntimePreference>('auto');
+  
+  // Default to WASM on mobile, otherwise AUTO
+  const [runtimePreference, setRuntimePreference] = useState<RuntimePreference>(
+    isMobile ? 'wasm' : 'auto'
+  );
+  
   const [profileId, setProfileId] = useState(DEFAULT_PROFILE_ID);
   const [media, setMedia] = useState<MediaSession | null>(null);
   const [progress, setProgress] = useState<ProgressEvent | null>(null);
   const [conveyorProgress, setConveyorProgress] = useState<ConveyorProgress | null>(null);
-  const [status, setStatus] = useState(
-    'Select an audio/video file or record from the microphone.',
-  );
+  const [status, setStatus] = useState('Select an audio/video file or record from microphone.');
   const [statusTone, setStatusTone] = useState<'neutral' | 'ok' | 'error'>('neutral');
   const [transcriptText, setTranscriptText] = useState('');
   const [result, setResult] = useState<TranscriptResult | null>(null);
   const [diagnostics, setDiagnostics] = useState<RuntimeDiagnostics | null>(null);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [dragActive, setDragActive] = useState(false);
+  const [webGpuSupport, setWebGpuSupport] = useState<WebGpuProbe | null>(null);
+  const [wakeLockActive, setWakeLockActive] = useState(false);
 
   const abortRef = useRef<AbortController | null>(null);
   const recorderRef = useRef<RecorderHandle | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const wakeLockRef = useRef<WakeLockLike | null>(null);
 
   const profile = useMemo(() => getProfile(profileId), [profileId]);
   const busy =
@@ -130,13 +161,88 @@ export function App() {
     phase === 'cancelling' ||
     phase === 'recording';
 
+  // Same probe the Worker uses, so what the interface promises and what the
+  // engine then does cannot drift apart.
+  useEffect(() => {
+    let cancelled = false;
+    void probeWebGpu().then((probe) => {
+      if (!cancelled) setWebGpuSupport(probe);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Cleanup on unmount
   useEffect(() => {
     return () => {
       abortRef.current?.abort();
       recorderRef.current?.cancel();
       inferenceClient.dispose();
+      releaseWakeLock();
     };
   }, []);
+
+  // The browser drops a screen wake lock every time the page is hidden, so it
+  // has to be taken again on return or the screen sleeps for the rest of a long
+  // transcription.
+  useEffect(() => {
+    if (!busy) return;
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible' && !wakeLockRef.current) {
+        void acquireWakeLock();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+  }, [busy]);
+
+  /**
+   * Keeps the screen awake while work is in flight.
+   *
+   * This is not a background-execution guarantee: the browser drops the lock
+   * whenever the page is hidden, and switching apps can still suspend the tab.
+   * It only removes the most common failure — the screen locking mid-run.
+   */
+  async function acquireWakeLock() {
+    if (!('wakeLock' in navigator)) return;
+    try {
+      const sentinel = await (
+        navigator as Navigator & { wakeLock: { request(type: 'screen'): Promise<WakeLockLike> } }
+      ).wakeLock.request('screen');
+      wakeLockRef.current = sentinel;
+      setWakeLockActive(true);
+      // The lock is released automatically when the sentinel fires; reflect that
+      // rather than showing a stale "active" badge.
+      sentinel.addEventListener?.('release', () => setWakeLockActive(false));
+    } catch {
+      // Denied or unsupported — transcription is unaffected.
+      setWakeLockActive(false);
+    }
+  }
+
+  function releaseWakeLock() {
+    const sentinel = wakeLockRef.current;
+    wakeLockRef.current = null;
+    setWakeLockActive(false);
+    void sentinel?.release().catch(() => {
+      /* already released by the browser */
+    });
+  }
+
+  /**
+   * Which device the Worker will actually pick, mirroring its decision so the
+   * quoted download size is the one the user will really pay.
+   */
+  const targetDevice: 'wasm' | 'webgpu' = useMemo(() => {
+    if (runtimePreference === 'wasm') return 'wasm';
+    const gpuUsable = webGpuSupport?.usable ?? false;
+    if (runtimePreference === 'webgpu') return gpuUsable ? 'webgpu' : 'wasm';
+    return autoMayUseWebGpu() && gpuUsable ? 'webgpu' : 'wasm';
+  }, [runtimePreference, webGpuSupport]);
+
+  const estimatedDownloadSize = profile ? downloadBytesFor(profile, targetDevice) : 0;
+  const targetDtype = profile ? profile.dtypeByDevice[targetDevice] : '';
 
   async function ingestFile(file: File): Promise<void> {
     abortRef.current?.abort();
@@ -144,7 +250,7 @@ export function App() {
     abortRef.current = controller;
 
     setPhase('normalizing');
-    setStatus('Inspecting media (duration, audio track)…');
+    setStatus('Inspecting media track structure…');
     setStatusTone('neutral');
     setResult(null);
     setTranscriptText('');
@@ -161,15 +267,16 @@ export function App() {
         throw new AudioPipelineError(
           'AUDIO_DECODE_UNSUPPORTED',
           'decode',
-          'This browser cannot decode the audio track via WebCodecs.',
+          'WebCodecs cannot decode the audio track in this browser.',
         );
       }
 
       const useConveyor = shouldUseConveyor(probe, probe.kind);
       const warnings: string[] = [];
       if (useConveyor) {
+        const { windowSeconds, overlapSeconds } = effectiveAudioLimits();
         warnings.push(
-          `Conveyor mode: ${AUDIO_LIMITS.windowSeconds}s windows, ${AUDIO_LIMITS.overlapSeconds}s overlap — model stays loaded.`,
+          `Conveyor: ${windowSeconds}s windows, ${overlapSeconds}s overlap. Stays in-browser.`,
         );
       }
 
@@ -180,22 +287,23 @@ export function App() {
           mediaKind: probe.kind,
           durationSeconds: probe.durationSeconds,
           warnings,
-          sourceLabel: probe.kind === 'video' ? 'Video file' : 'Media file',
+          sourceLabel: probe.kind === 'video' ? 'Video track' : 'Audio track',
           byteLength: probe.byteLength,
           formatName: probe.formatName,
         });
         setPhase('ready');
         setStatus(
-          `Ready · ${probe.kind} · ${formatClock(probe.durationSeconds)} · ${formatBytes(probe.byteLength)} · windowed pipeline`,
+          `Ready · ${probe.kind} · ${formatClock(probe.durationSeconds)} · ${formatBytes(probe.byteLength)} · windowed`,
         );
         setStatusTone('ok');
         return;
       }
 
-      setStatus('Normalizing short clip to mono 16 kHz…');
+      setStatus('Normalizing short clip to mono 16 kHz PCM…');
+      const maxSeconds = getInlineDecodeMaxSeconds();
       const normalized = await normalizeAudioBlob(file, {
         signal: controller.signal,
-        maxDurationSeconds: AUDIO_LIMITS.inlineDecodeMaxSeconds,
+        maxDurationSeconds: maxSeconds,
       });
       if (controller.signal.aborted) return;
 
@@ -204,7 +312,7 @@ export function App() {
         samples: normalized.samples,
         durationSeconds: normalized.durationSeconds,
         warnings: normalized.warnings,
-        sourceLabel: kind === 'video' ? 'Video file' : 'Uploaded file',
+        sourceLabel: kind === 'video' ? 'Video clip' : 'Audio clip',
       });
       setPhase('ready');
       setStatus(
@@ -215,15 +323,12 @@ export function App() {
     } catch (error) {
       if (controller.signal.aborted) return;
 
-      // Fallback for tiny audio-only files when container probe fails.
-      if (
-        kind !== 'video' &&
-        file.size <= AUDIO_LIMITS.inlineDecodeMaxBytes
-      ) {
+      if (kind !== 'video' && file.size <= AUDIO_LIMITS.inlineDecodeMaxBytes) {
         try {
+          const maxSeconds = getInlineDecodeMaxSeconds();
           const normalized = await normalizeAudioBlob(file, {
             signal: controller.signal,
-            maxDurationSeconds: AUDIO_LIMITS.inlineDecodeMaxSeconds,
+            maxDurationSeconds: maxSeconds,
           });
           if (controller.signal.aborted) return;
           setMedia({
@@ -231,7 +336,7 @@ export function App() {
             samples: normalized.samples,
             durationSeconds: normalized.durationSeconds,
             warnings: normalized.warnings,
-            sourceLabel: 'Uploaded file',
+            sourceLabel: 'Raw file',
           });
           setPhase('ready');
           setStatus(
@@ -248,7 +353,7 @@ export function App() {
       const message =
         error instanceof AudioPipelineError
           ? error.message
-          : 'Could not prepare the selected media.';
+          : 'Could not decode the selected file.';
       setMedia(null);
       setPhase('error');
       setStatus(message);
@@ -262,7 +367,7 @@ export function App() {
     abortRef.current = controller;
 
     setPhase('normalizing');
-    setStatus('Normalizing recording to mono 16 kHz…');
+    setStatus('Normalizing mic recording to mono 16 kHz…');
     setStatusTone('neutral');
     setResult(null);
     setTranscriptText('');
@@ -278,7 +383,7 @@ export function App() {
         samples: normalized.samples,
         durationSeconds: normalized.durationSeconds,
         warnings: normalized.warnings,
-        sourceLabel: 'Microphone recording',
+        sourceLabel: 'Voice recording',
       });
       setPhase('ready');
       setStatus(
@@ -291,7 +396,7 @@ export function App() {
       const message =
         error instanceof AudioPipelineError
           ? error.message
-          : 'Could not prepare the recording.';
+          : 'Could not prepare recording.';
       setMedia(null);
       setPhase('error');
       setStatus(message);
@@ -318,7 +423,7 @@ export function App() {
     clearSession(false);
     setPhase('recording');
     setRecordingSeconds(0);
-    setStatus('Recording… click Stop when finished.');
+    setStatus('Recording active… Click Stop to process.');
     setStatusTone('neutral');
 
     try {
@@ -328,7 +433,7 @@ export function App() {
       recorderRef.current = handle;
     } catch {
       setPhase('error');
-      setStatus('Microphone permission denied or unavailable. File upload still works.');
+      setStatus('Microphone permission blocked or unavailable.');
       setStatusTone('error');
     }
   }
@@ -342,7 +447,7 @@ export function App() {
       await ingestRecordingBlob(blob);
     } catch {
       setPhase('error');
-      setStatus('Recording failed.');
+      setStatus('Recording stop failed.');
       setStatusTone('error');
     }
   }
@@ -355,24 +460,27 @@ export function App() {
 
     setPhase('preparing-model');
     setStatus(
-      'Preparing model… first run downloads ~' + formatBytes(profile.approximateDownloadBytes),
+      `Downloading/Loading model weights (~${formatBytes(estimatedDownloadSize)})…`
     );
     setStatusTone('neutral');
     setProgress(null);
     setConveyorProgress(null);
 
     try {
+      await acquireWakeLock();
+
       const prepared = await inferenceClient.prepare(profileId, runtimePreference, setProgress);
       setDiagnostics(prepared.diagnostics);
+      
       if (prepared.diagnostics.fallbackReasonCode) {
-        setStatus(`WebGPU unavailable — using WASM (${prepared.diagnostics.fallbackReasonCode}).`);
+        setStatus(`GPU unavailable: using WASM (${prepared.diagnostics.fallbackReasonCode}).`);
       }
 
       setPhase('transcribing');
       setStatus(
         media.mode === 'conveyor'
-          ? 'Conveyor transcription started…'
-          : 'Transcribing…',
+          ? 'Conveyor window loop started…'
+          : 'Running Whisper inference…',
       );
 
       let next: TranscriptResult;
@@ -422,8 +530,8 @@ export function App() {
       setStatus(
         warning ??
           (media.mode === 'conveyor'
-            ? 'Transcription complete via windowed pipeline. Media stayed on-device.'
-            : 'Transcription complete. Audio and text stayed in this browser session.'),
+            ? 'Complete via windowed conveyor. Local execution.'
+            : 'Complete. Local browser session transcription.'),
       );
       setStatusTone(warning ? 'neutral' : 'ok');
     } catch (error) {
@@ -442,17 +550,19 @@ export function App() {
           ? error.message
           : code
             ? `Transcription failed (${code}).`
-            : 'Transcription failed.',
+            : 'Transcription execution error.',
       );
       setStatusTone('error');
       setProgress(null);
       setConveyorProgress(null);
+    } finally {
+      releaseWakeLock();
     }
   }
 
   async function cancelWork(): Promise<void> {
     setPhase('cancelling');
-    setStatus('Cancelling…');
+    setStatus('Cancelling engine task…');
     abortRef.current?.abort();
     abortRef.current = new AbortController();
     recorderRef.current?.cancel();
@@ -461,8 +571,9 @@ export function App() {
     setPhase(media ? 'ready' : 'idle');
     setProgress(null);
     setConveyorProgress(null);
-    setStatus('Cancelled. Session media still available until Clear.');
+    setStatus('Cancelled. Session cached.');
     setStatusTone('neutral');
+    releaseWakeLock();
   }
 
   function clearSession(resetStatus = true): void {
@@ -479,8 +590,9 @@ export function App() {
     setDiagnostics(null);
     setRecordingSeconds(0);
     setPhase('idle');
+    releaseWakeLock();
     if (resetStatus) {
-      setStatus('Session cleared. Nothing was saved.');
+      setStatus('Session cleared.');
       setStatusTone('neutral');
     }
     if (fileInputRef.current) {
@@ -510,268 +622,321 @@ export function App() {
 
   async function copyTranscript(): Promise<void> {
     await navigator.clipboard.writeText(transcriptText);
-    setStatus('Copied to clipboard.');
+    setStatus('Text copied to clipboard.');
     setStatusTone('ok');
   }
 
   const progressRatio = conveyorProgress?.ratio ?? progress?.ratio;
 
+  const gpuFellBack = runtimePreference === 'webgpu' && webGpuSupport && !webGpuSupport.usable;
+
   return (
-    <main className="shell">
-      <header className="brand" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '1rem' }}>
-        <div style={{ flex: '1 1 400px' }}>
+    <div className="app-viewport">
+      <div className="app-surface">
+        <header className="app-header">
           <h1>Whisper Transcriber</h1>
-          <p>
-            Private speech-to-text in your browser. Audio and video are processed in a windowed
-            conveyor (mono 16 kHz chunks) so large files do not load full PCM into memory. The model
-            stays resident across windows.
-          </p>
-        </div>
-        <button
-          type="button"
-          className="btn secondary"
-          style={{ borderRadius: '20px', fontSize: '0.8rem', padding: '0.4rem 0.85rem' }}
-          onClick={() => {
-            localStorage.setItem('ui-mode', 'minimal');
-            window.location.reload();
-          }}
-        >
-          Minimalist MD3 UI
-        </button>
-      </header>
+          <p>Speech to text, entirely on this device.</p>
+        </header>
 
-      <section className="panel" aria-labelledby="input-heading">
-        <h2 id="input-heading">Input</h2>
+        <main className="app-content">
 
-        <div
-          className={`dropzone${dragActive ? ' active' : ''}`}
-          onDragEnter={(event) => {
-            event.preventDefault();
-            setDragActive(true);
-          }}
-          onDragOver={(event) => event.preventDefault()}
-          onDragLeave={() => setDragActive(false)}
-          onDrop={onDrop}
-        >
-          Drop an audio or video file here, or choose one below.
-          <div className="field" style={{ marginTop: '0.85rem' }}>
-            <label htmlFor="audio-file">Audio / video file</label>
-            <input
-              id="audio-file"
-              ref={fileInputRef}
-              type="file"
-              accept="audio/*,video/*,.wav,.mp3,.m4a,.ogg,.webm,.flac,.mp4,.m4v,.mov,.mkv,.avi,.mpeg,.mpg,.ogv"
-              disabled={busy}
-              onChange={(event) => void onFileChosen(event.target.files?.[0] ?? null)}
-            />
+          {/* Environment notices */}
+          <div className="system-notices">
+            {isMobile && (
+              <div className="notice-banner warning">
+                Keep this tab open and in the foreground. Switching apps can suspend
+                the transcription until you come back.
+              </div>
+            )}
+
+            {gpuFellBack && (
+              <div className="notice-banner">
+                WebGPU is unavailable here ({webGpuSupport.rejection}). Running on WASM
+                instead — slower, same result.
+              </div>
+            )}
+
+            <div className="badge-row">
+              <span className="status-badge highlight">
+                First run downloads ~{formatBytes(estimatedDownloadSize)} · {targetDevice} · {targetDtype}
+              </span>
+              {wakeLockActive && (
+                <span className="status-badge green">Screen kept awake</span>
+              )}
+            </div>
           </div>
-        </div>
 
-        <div className="actions">
-          {phase === 'recording' ? (
-            <button type="button" className="btn danger" onClick={() => void stopRecording()}>
-              Stop ({formatClock(recordingSeconds)})
-            </button>
-          ) : (
-            <button
-              type="button"
-              className="btn secondary"
-              disabled={busy}
-              onClick={() => void startRecording()}
-            >
-              Record microphone
-            </button>
+          {/* Input Panel */}
+          <section className="input-area">
+            {!media && phase !== 'recording' ? (
+              <div
+                className={`md-dropzone${dragActive ? ' active' : ''}`}
+                onDragEnter={(e) => { e.preventDefault(); setDragActive(true); }}
+                onDragOver={(e) => e.preventDefault()}
+                onDragLeave={() => setDragActive(false)}
+                onDrop={onDrop}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                <div className="dropzone-icon">
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                    <polyline points="17 8 12 3 7 8" />
+                    <line x1="12" y1="3" x2="12" y2="15" />
+                  </svg>
+                </div>
+                <div className="dropzone-label">Drag & drop files here</div>
+                <div className="dropzone-sublabel">Supports wav, mp3, mp4, mov, webm, m4a, and others</div>
+                
+                <div className="file-input-wrapper">
+                  <button className="file-btn" type="button">Select File</button>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="audio/*,video/*,.wav,.mp3,.m4a,.ogg,.webm,.flac,.mp4,.m4v,.mov,.mkv,.avi,.mpeg,.mpg,.ogv"
+                    disabled={busy}
+                    onChange={(e) => void onFileChosen(e.target.files?.[0] ?? null)}
+                    onClick={(e) => e.stopPropagation()}
+                  />
+                </div>
+              </div>
+            ) : (
+              <div className="session-info-card">
+                <div>
+                  <span className="session-info-text">
+                    {media ? media.sourceLabel : 'Recording session'}
+                  </span>
+                  {media && (
+                    <span className="session-info-meta">
+                      {' · '}{formatClock(media.durationSeconds)}
+                      {media.mode === 'conveyor' && ' · conveyor pipeline'}
+                      {media.mode === 'inline' && ' · fully buffered'}
+                    </span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  className="btn-pill danger"
+                  disabled={busy}
+                  onClick={() => clearSession()}
+                >
+                  Clear File
+                </button>
+              </div>
+            )}
+
+            <div className="actions-layout">
+              {phase === 'recording' ? (
+                <button type="button" className="btn-pill danger" onClick={() => void stopRecording()}>
+                  Stop Recording ({formatClock(recordingSeconds)})
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="btn-pill primary"
+                  disabled={busy || !!media}
+                  onClick={() => void startRecording()}
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+                    <path d="M19 10v1a7 7 0 0 1-14 0v-1"/>
+                    <line x1="12" y1="19" x2="12" y2="22"/>
+                  </svg>
+                  Record Audio
+                </button>
+              )}
+
+              {media && !busy && (
+                <button
+                  type="button"
+                  className="btn-pill primary"
+                  onClick={() => void runTranscription()}
+                >
+                  Start Transcription
+                </button>
+              )}
+
+              {busy && phase !== 'recording' && (
+                <button
+                  type="button"
+                  className="btn-pill danger"
+                  onClick={() => void cancelWork()}
+                >
+                  Cancel
+                </button>
+              )}
+            </div>
+          </section>
+
+          {/* Settings Section */}
+          <section className="settings-section">
+            <div className="settings-grid">
+              <div className="md-field">
+                <label htmlFor="profile">Model</label>
+                <select
+                  id="profile"
+                  className="md-select"
+                  value={profileId}
+                  disabled={busy}
+                  onChange={(e) => setProfileId(e.target.value)}
+                >
+                  {MODEL_PROFILES.map((item) => {
+                    const size = downloadBytesFor(item, targetDevice);
+                    return (
+                      <option key={item.id} value={item.id}>
+                        {item.label} (~{formatBytes(size)})
+                      </option>
+                    );
+                  })}
+                </select>
+              </div>
+
+              <div className="md-field">
+                <label htmlFor="language">Language</label>
+                <select
+                  id="language"
+                  className="md-select"
+                  value={language}
+                  disabled={busy}
+                  onChange={(e) => setLanguage(e.target.value as LanguageOption)}
+                >
+                  <option value="auto">Automatic Detection</option>
+                  <option value="en">English Only</option>
+                  <option value="ru">Russian Only</option>
+                </select>
+              </div>
+
+              <div className="md-field">
+                <label htmlFor="timestamps">Timestamps</label>
+                <select
+                  id="timestamps"
+                  className="md-select"
+                  value={timestamps}
+                  disabled={busy}
+                  onChange={(e) => setTimestamps(e.target.value as TimestampsOption)}
+                >
+                  <option value="segment">Show Timestamps</option>
+                  <option value="none">Text Only</option>
+                </select>
+              </div>
+
+              <div className="md-field">
+                <label htmlFor="runtime">Engine Runtime</label>
+                <select
+                  id="runtime"
+                  className="md-select"
+                  value={runtimePreference}
+                  disabled={busy}
+                  onChange={(e) => setRuntimePreference(e.target.value as RuntimePreference)}
+                >
+                  <option value="auto">Auto (GPU/WASM)</option>
+                  <option value="wasm">WASM Only (Safe/Mobile)</option>
+                  <option value="webgpu">WebGPU Preferred</option>
+                </select>
+              </div>
+            </div>
+          </section>
+
+          {/* Status Message */}
+          <div className={`status-text ${statusTone !== 'neutral' ? statusTone : ''}`}>
+            {phase === 'recording' && (
+              <span className="recording-dot" aria-hidden="true" />
+            )}
+            {status}
+          </div>
+
+          {/* Progress Indicator */}
+          {progressRatio != null && (
+            <div className="progress-container">
+              <div className="progress-label-row">
+                <span>{progressLabel(progress, conveyorProgress)}</span>
+                <span>{Math.round(progressRatio * 100)}%</span>
+              </div>
+              <div className={`progress-track ${busy ? 'active' : ''}`}>
+                <div
+                  className="progress-fill"
+                  style={{ width: `${progressRatio * 100}%` }}
+                />
+              </div>
+            </div>
           )}
-          <button
-            type="button"
-            className="btn secondary"
-            disabled={phase === 'idle' && !media && !result}
-            onClick={() => clearSession()}
-          >
-            Clear session
-          </button>
-        </div>
-      </section>
 
-      <section className="panel" aria-labelledby="settings-heading">
-        <h2 id="settings-heading">Settings</h2>
-        <div className="row">
-          <div className="field">
-            <label htmlFor="profile">Model</label>
-            <select
-              id="profile"
-              value={profileId}
-              disabled={busy}
-              onChange={(event) => setProfileId(event.target.value)}
-            >
-              {MODEL_PROFILES.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.label} (~{formatBytes(item.approximateDownloadBytes)})
-                </option>
-              ))}
-            </select>
-          </div>
+          {/* Outputs */}
+          {transcriptText && (
+            <section className="output-card">
+              <div className="output-title-row">
+                <h3>Transcribed Output</h3>
+                <div className="actions-layout" style={{ margin: 0 }}>
+                  <button type="button" className="btn-pill secondary" onClick={() => void copyTranscript()}>
+                    Copy
+                  </button>
+                  <button type="button" className="btn-pill tonal" onClick={exportTxt}>
+                    TXT
+                  </button>
+                  {result && result.segments.length > 0 && (
+                    <>
+                      <button type="button" className="btn-pill tonal" onClick={exportSrt}>
+                        SRT
+                      </button>
+                      <button type="button" className="btn-pill tonal" onClick={exportVtt}>
+                        VTT
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
 
-          <div className="field">
-            <label htmlFor="language">Language</label>
-            <select
-              id="language"
-              value={language}
-              disabled={busy}
-              onChange={(event) => setLanguage(event.target.value as LanguageOption)}
-            >
-              <option value="auto">Automatic</option>
-              <option value="en">English</option>
-              <option value="ru">Russian</option>
-            </select>
-          </div>
+              {/* Editable: the transcript is a draft to correct, and every export
+                  below reads from this field. */}
+              <textarea
+                className="output-textarea"
+                value={transcriptText}
+                aria-label="Transcript, editable"
+                onChange={(event) => setTranscriptText(event.target.value)}
+              />
 
-          <div className="field">
-            <label htmlFor="timestamps">Timestamps</label>
-            <select
-              id="timestamps"
-              value={timestamps}
-              disabled={busy}
-              onChange={(event) => setTimestamps(event.target.value as TimestampsOption)}
-            >
-              <option value="segment">Segment</option>
-              <option value="none">Off</option>
-            </select>
-          </div>
-
-          <div className="field">
-            <label htmlFor="runtime">Runtime</label>
-            <select
-              id="runtime"
-              value={runtimePreference}
-              disabled={busy}
-              onChange={(event) => setRuntimePreference(event.target.value as RuntimePreference)}
-            >
-              <option value="auto">Auto (WebGPU → WASM)</option>
-              <option value="wasm">WASM only</option>
-              <option value="webgpu">WebGPU preferred</option>
-            </select>
-          </div>
-        </div>
-
-        <div className="actions">
-          <button
-            type="button"
-            className="btn"
-            disabled={!media || busy}
-            onClick={() => void runTranscription()}
-          >
-            Transcribe
-          </button>
-          <button
-            type="button"
-            className="btn secondary"
-            disabled={!busy || phase === 'recording'}
-            onClick={() => void cancelWork()}
-          >
-            Cancel
-          </button>
-        </div>
-
-        <div className="status" data-tone={statusTone} role="status" aria-live="polite">
-          {busy && phase !== 'recording' ? progressLabel(progress, conveyorProgress) : status}
-        </div>
-        {progressRatio != null && (
-          <div className="progress" aria-hidden="true">
-            <span style={{ width: `${Math.round(Math.min(1, Math.max(0, progressRatio)) * 100)}%` }} />
-          </div>
-        )}
-      </section>
-
-      <section className="panel" aria-labelledby="result-heading">
-        <h2 id="result-heading">Transcript</h2>
-        <label className="field" htmlFor="transcript">
-          Editable result
-          <textarea
-            id="transcript"
-            className="transcript"
-            value={transcriptText}
-            onChange={(event) => setTranscriptText(event.target.value)}
-            placeholder="Transcript appears here after inference. Large media updates window by window."
-          />
-        </label>
-
-        <div className="actions">
-          <button
-            type="button"
-            className="btn secondary"
-            disabled={!transcriptText}
-            onClick={() => void copyTranscript()}
-          >
-            Copy
-          </button>
-          <button type="button" className="btn secondary" disabled={!transcriptText} onClick={exportTxt}>
-            Export TXT
-          </button>
-          <button
-            type="button"
-            className="btn secondary"
-            disabled={!result?.segments.length}
-            onClick={exportSrt}
-          >
-            Export SRT
-          </button>
-          <button
-            type="button"
-            className="btn secondary"
-            disabled={!result?.segments.length}
-            onClick={exportVtt}
-          >
-            Export WebVTT
-          </button>
-        </div>
-
-        {!!result?.segments.length && (
-          <ul className="segments" aria-label="Timestamped segments">
-            {result.segments.map((segment, index) => (
-              <li key={`${segment.startSeconds}-${index}`}>
-                <time>
-                  {formatClock(segment.startSeconds)}–{formatClock(segment.endSeconds)}
-                </time>
-                <span>{segment.text}</span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-
-      <section className="panel" aria-labelledby="diagnostics-heading">
-        <h2 id="diagnostics-heading">Diagnostics</h2>
-        <div className="meta">
-          <span>phase: {phase}</span>
-          <span>mode: {media?.mode ?? '—'}</span>
-          <span>profile: {profile?.id ?? '—'}</span>
-          <span>source: {media?.sourceLabel ?? '—'}</span>
-          {media?.mode === 'conveyor' && (
-            <>
-              <span>media: {media.mediaKind}</span>
-              <span>bytes: {formatBytes(media.byteLength)}</span>
-              <span>format: {media.formatName ?? '—'}</span>
-            </>
+              {timestamps === 'segment' && result && result.segments.length > 0 && (
+                <ul className="segments-list">
+                  {result.segments.map((seg, idx) => (
+                    <li key={idx} className="segment-item">
+                      <span className="segment-time">
+                        [{formatClock(seg.startSeconds)} → {formatClock(seg.endSeconds)}]
+                      </span>
+                      <span className="segment-text">{seg.text}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
           )}
-          <span>
-            duration: {media ? formatClock(media.durationSeconds) : '—'}
-          </span>
-          <span>
-            window: {AUDIO_LIMITS.windowSeconds}s / overlap {AUDIO_LIMITS.overlapSeconds}s
-          </span>
-          <span>
-            chunk:{' '}
-            {conveyorProgress
-              ? `${conveyorProgress.chunkIndex + 1}/${conveyorProgress.chunkTotal}`
-              : '—'}
-          </span>
-          <span>runtime: {diagnostics?.effectiveRuntime ?? '—'}</span>
-          <span>requested: {diagnostics?.requestedRuntime ?? runtimePreference}</span>
-          <span>prep: {diagnostics?.preparationMs != null ? `${diagnostics.preparationMs} ms` : '—'}</span>
-          <span>build: {__APP_VERSION__} · {__BUILD_ID__}</span>
-        </div>
-      </section>
-    </main>
+
+          {/* Diagnostics Section */}
+          {diagnostics && (
+            <section className="diagnostics-panel">
+              <div className="diagnostics-title">Engine Diagnostics</div>
+              <div className="diagnostics-grid">
+                <div className="diagnostic-item">
+                  <span>Runtime:</span> {diagnostics.effectiveRuntime}
+                </div>
+                <div className="diagnostic-item">
+                  <span>Model ID:</span> {diagnostics.modelProfileId}
+                </div>
+                <div className="diagnostic-item">
+                  <span>Preparation:</span> {diagnostics.preparationMs ? `${(diagnostics.preparationMs / 1000).toFixed(2)}s` : 'N/A'}
+                </div>
+                <div className="diagnostic-item">
+                  <span>Inference:</span> {diagnostics.inferenceMs ? `${(diagnostics.inferenceMs / 1000).toFixed(2)}s` : 'N/A'}
+                </div>
+                {diagnostics.fallbackReasonCode && (
+                  <div className="diagnostic-item" style={{ color: 'var(--md-error)' }}>
+                    <span>Fallback:</span> {diagnostics.fallbackReasonCode}
+                  </div>
+                )}
+              </div>
+            </section>
+          )}
+
+        </main>
+      </div>
+    </div>
   );
 }

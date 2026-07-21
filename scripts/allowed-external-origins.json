@@ -1,0 +1,20 @@
+{
+  "$comment": [
+    "Origins allowed to appear as string literals in the built bundle.",
+    "A new entry here is a deliberate decision: the host serves this app under a",
+    "strict CSP, so anything actually fetched from a third party will either be",
+    "blocked or leak the visitor's IP. Every entry must say why it is inert or",
+    "why it is genuinely needed.",
+    "Adding an origin without a reason defeats the purpose of the check."
+  ],
+  "origins": {
+    "https://huggingface.co": "Model weights. The only intentional third-party fetch; allowlisted in the host connect-src.",
+    "https://cdn.jsdelivr.net": "Inert. Transformers.js hardcodes this as its default ONNX Runtime wasmPaths; whisper.worker.ts clears wasmPaths at startup so it is never requested.",
+    "https://developer.mozilla.org": "Inert. Appears in library error messages and doc links.",
+    "https://github.com": "Inert. Appears in library error messages and doc links.",
+    "https://gist.github.com": "Inert. Appears in library error messages and doc links.",
+    "https://react.dev": "Inert. Appears in React development warnings.",
+    "https://web.dev": "Inert. Appears in library documentation links.",
+    "https://www.w3.org": "Inert. XML namespace URIs for inline SVG icons — identifiers, never fetched."
+  }
+}

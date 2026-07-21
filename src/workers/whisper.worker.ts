@@ -1,5 +1,6 @@
 import { env, pipeline, type AutomaticSpeechRecognitionPipeline } from '@huggingface/transformers';
-import { getProfile, isMobileUA } from '../inference/profiles';
+import { getProfile } from '../inference/profiles';
+import { autoMayUseWebGpu, probeWebGpu } from '../platform/environment';
 import type {
   ProgressEvent,
   RuntimeDiagnostics,
@@ -101,37 +102,27 @@ async function createPipeline(
   postProgress(requestId, { phase: 'manifest', status: 'completed', ratio: 1 });
   postProgress(requestId, { phase: 'runtime-init', status: 'started' });
 
-  let webGpuAvailable = false;
+  // Only ask the platform about the GPU when it could actually be used —
+  // requesting an adapter during a plain WASM run is wasted work and would
+  // otherwise leave a misleading fallback reason in the diagnostics.
+  let tryWebGpu = false;
 
-  if (typeof navigator !== 'undefined' && 'gpu' in navigator) {
-    try {
-      const adapter = await (navigator as any).gpu.requestAdapter();
-      if (!adapter) {
-        fallbackReasonCode = 'WEBGPU_NO_ADAPTER';
+  if (runtimePreference !== 'wasm') {
+    if (runtimePreference === 'auto' && !autoMayUseWebGpu()) {
+      fallbackReasonCode = 'WEBGPU_MOBILE_POLICY';
+    } else {
+      const probe = await probeWebGpu();
+      if (probe.usable) {
+        tryWebGpu = true;
       } else {
-        const limit = adapter.limits?.maxStorageBufferBindingSize ?? 0;
-        const MIN_REQUIRED_LIMIT = 128 * 1024 * 1024; // 128MB
-        if (limit < MIN_REQUIRED_LIMIT) {
-          fallbackReasonCode = `WEBGPU_BUFFER_LIMIT_LOW_${Math.round(limit / (1024 * 1024))}MB`;
-        } else {
-          webGpuAvailable = true;
-        }
+        fallbackReasonCode = probe.rejection;
       }
-    } catch {
-      fallbackReasonCode = 'WEBGPU_ADAPTER_ERROR';
     }
-  } else {
-    fallbackReasonCode = 'WEBGPU_API_MISSING';
   }
 
-  const isMobile = isMobileUA();
-  const tryWebGpu =
-    runtimePreference === 'webgpu' ||
-    (runtimePreference === 'auto' && !isMobile && webGpuAvailable);
-
-  if (runtimePreference === 'webgpu' && !webGpuAvailable) {
-    throw makeError('RUNTIME_UNSUPPORTED', 'prepare', true, true);
-  }
+  // An explicit WebGPU preference is a preference, not a demand: WASM stays a
+  // supported path on every device, so an unusable GPU degrades instead of
+  // failing the request.
 
   const load = async (device: 'wasm' | 'webgpu') => {
     const dtype = (profile.dtypeByDevice[device] ??

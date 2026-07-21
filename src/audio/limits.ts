@@ -1,4 +1,4 @@
-import { isMobileUA } from '../inference/profiles';
+import { isMobileUA } from '../platform/environment';
 
 export const AUDIO_LIMITS = {
   /** Hard cap on uploaded container size (audio/video). Decoding stays windowed. */
@@ -17,16 +17,49 @@ export const AUDIO_LIMITS = {
   interChunkYieldMs: 16,
 } as const;
 
+/**
+ * Mobile browsers give a tab a far smaller memory budget than the device's RAM
+ * suggests, and exceeding it kills the tab outright rather than throwing. Every
+ * mobile figure below exists to lower the peak, not to save time.
+ */
+export const MOBILE_AUDIO_LIMITS = {
+  /** A 90 s AudioBuffer at the source rate is ~35 MB before resampling. */
+  inlineDecodeMaxSeconds: 30,
+  /** Halves the peak encoder tensor versus the desktop window. */
+  windowSeconds: 15,
+  overlapSeconds: 3,
+} as const;
+
+/**
+ * Effective audio limits for this device.
+ *
+ * Read through this — never off AUDIO_LIMITS directly in UI code, or the
+ * interface ends up describing a pipeline the device is not running.
+ */
+export function effectiveAudioLimits(): {
+  inlineDecodeMaxSeconds: number;
+  windowSeconds: number;
+  overlapSeconds: number;
+} {
+  return isMobileUA()
+    ? { ...MOBILE_AUDIO_LIMITS }
+    : {
+        inlineDecodeMaxSeconds: AUDIO_LIMITS.inlineDecodeMaxSeconds,
+        windowSeconds: AUDIO_LIMITS.windowSeconds,
+        overlapSeconds: AUDIO_LIMITS.overlapSeconds,
+      };
+}
+
 export function getInlineDecodeMaxSeconds(): number {
-  return isMobileUA() ? 30 : AUDIO_LIMITS.inlineDecodeMaxSeconds;
+  return effectiveAudioLimits().inlineDecodeMaxSeconds;
 }
 
 export function getWindowSeconds(): number {
-  return isMobileUA() ? 15 : AUDIO_LIMITS.windowSeconds;
+  return effectiveAudioLimits().windowSeconds;
 }
 
 export function getOverlapSeconds(): number {
-  return isMobileUA() ? 3 : AUDIO_LIMITS.overlapSeconds;
+  return effectiveAudioLimits().overlapSeconds;
 }
 
 export type NormalizedAudio = {
