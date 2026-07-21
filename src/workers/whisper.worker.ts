@@ -14,6 +14,15 @@ import type {
 env.allowLocalModels = false;
 env.useBrowserCache = true;
 
+// Transformers.js defaults ONNX Runtime's `wasmPaths` to a jsDelivr URL. That
+// makes the runtime glue and the WASM binary come from a third-party CDN, which
+// the host CSP rejects — and it defeats the copies the bundler already emitted
+// next to this worker. Clearing it puts ORT back on its bundler-resolved local
+// assets, so the only network traffic left is the pinned model download.
+if (env.backends.onnx.wasm) {
+  env.backends.onnx.wasm.wasmPaths = undefined;
+}
+
 const APP_VERSION = __APP_VERSION__;
 const BUILD_ID = __BUILD_ID__;
 const TRANSFORMERS_VERSION = '3.x';
