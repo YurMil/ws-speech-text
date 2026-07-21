@@ -14,8 +14,8 @@ import type {
 env.allowLocalModels = false;
 env.useBrowserCache = true;
 
-const APP_VERSION = '0.1.0-prototype';
-const BUILD_ID = 'local-dev';
+const APP_VERSION = __APP_VERSION__;
+const BUILD_ID = __BUILD_ID__;
 const TRANSFORMERS_VERSION = '3.x';
 
 type PipelineSlot = {
