@@ -8,7 +8,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc -b --pretty false"
+    "typecheck": "tsc -b --pretty false",
+    "verify": "node scripts/verify-artifact.mjs"
   },
   "dependencies": {
     "@huggingface/transformers": "^3.7.2",

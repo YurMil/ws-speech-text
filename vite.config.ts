@@ -29,6 +29,7 @@ function resolveBuildId(): string {
 
 const APP_VERSION = pkg.version;
 const BUILD_ID = resolveBuildId();
+const BUILD_TIME = new Date().toISOString();
 
 /** Emits dist/build-info.json so the host sync script can label the artifact. */
 function buildInfoPlugin(): Plugin {
@@ -38,7 +39,11 @@ function buildInfoPlugin(): Plugin {
       this.emitFile({
         type: 'asset',
         fileName: 'build-info.json',
-        source: `${JSON.stringify({ version: APP_VERSION, buildId: BUILD_ID }, null, 2)}\n`,
+        source: `${JSON.stringify(
+          { version: APP_VERSION, buildId: BUILD_ID, buildTime: BUILD_TIME },
+          null,
+          2,
+        )}\n`,
       });
     },
   };
