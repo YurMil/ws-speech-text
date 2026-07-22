@@ -21,11 +21,11 @@ import {
   toWebVtt,
 } from '../export/formats';
 import {
+  availableProfiles,
   DEFAULT_PROFILE_ID,
   downloadBytesFor,
   formatBytes,
   getProfile,
-  MODEL_PROFILES,
 } from '../inference/profiles';
 import {
   autoMayUseWebGpu,
@@ -34,6 +34,7 @@ import {
   type WebGpuProbe,
 } from '../platform/environment';
 import { inferenceClient } from '../inference/requestManager';
+import { finalizeTranscript } from '../export/transcriptText';
 import type {
   LanguageOption,
   ProgressEvent,
@@ -147,6 +148,7 @@ export function App() {
   const [dragActive, setDragActive] = useState(false);
   const [webGpuSupport, setWebGpuSupport] = useState<WebGpuProbe | null>(null);
   const [wakeLockActive, setWakeLockActive] = useState(false);
+  const [confirmedDownloads, setConfirmedDownloads] = useState<ReadonlySet<string>>(new Set());
 
   const abortRef = useRef<AbortController | null>(null);
   const recorderRef = useRef<RecorderHandle | null>(null);
@@ -240,6 +242,10 @@ export function App() {
     if (runtimePreference === 'webgpu') return gpuUsable ? 'webgpu' : 'wasm';
     return autoMayUseWebGpu() && gpuUsable ? 'webgpu' : 'wasm';
   }, [runtimePreference, webGpuSupport]);
+
+  // Heavy weights are withheld on mobile rather than offered and then killed by
+  // the OS halfway through loading.
+  const offeredProfiles = useMemo(() => availableProfiles(isMobile), [isMobile]);
 
   const estimatedDownloadSize = profile ? downloadBytesFor(profile, targetDevice) : 0;
   const targetDtype = profile ? profile.dtypeByDevice[targetDevice] : '';
@@ -455,6 +461,23 @@ export function App() {
   async function runTranscription(): Promise<void> {
     if (!media || !profile) return;
 
+    // Only ask once per profile, and only for the large downloads — losing a
+    // few hundred megabytes to a mis-click on a metered connection is a real
+    // cost, but confirming a 41 MB fetch every time would just be noise.
+    if (profile.confirmBeforeDownload && !confirmedDownloads.has(profile.id)) {
+      const size = formatBytes(estimatedDownloadSize);
+      const accepted = window.confirm(
+        `${profile.label} needs a ~${size} one-time download, then it is cached in this browser.\n\n` +
+          'On a metered or slow connection this can take a while. Continue?',
+      );
+      if (!accepted) {
+        setStatus('Download cancelled. Pick a smaller model to start right away.');
+        setStatusTone('neutral');
+        return;
+      }
+      setConfirmedDownloads((previous) => new Set(previous).add(profile.id));
+    }
+
     const controller = new AbortController();
     abortRef.current = controller;
 
@@ -511,7 +534,7 @@ export function App() {
         });
       } else {
         const samples = media.samples.slice();
-        next = await inferenceClient.transcribe({
+        const raw = await inferenceClient.transcribe({
           profileId,
           runtimePreference,
           audio: samples,
@@ -519,6 +542,10 @@ export function App() {
           timestamps,
           onProgress: setProgress,
         });
+        // The conveyor cleans up its own output as it merges windows; the
+        // one-shot path has to do it here so both produce the same shape of
+        // text.
+        next = { ...raw, text: finalizeTranscript(raw.text) };
       }
 
       setResult(next);
@@ -779,15 +806,16 @@ export function App() {
                   disabled={busy}
                   onChange={(e) => setProfileId(e.target.value)}
                 >
-                  {MODEL_PROFILES.map((item) => {
+                  {offeredProfiles.map((item) => {
                     const size = downloadBytesFor(item, targetDevice);
                     return (
                       <option key={item.id} value={item.id}>
-                        {item.label} (~{formatBytes(size)})
+                        {item.label} — ~{formatBytes(size)}
                       </option>
                     );
                   })}
                 </select>
+                {profile && <p className="field-note">{profile.note}</p>}
               </div>
 
               <div className="md-field">

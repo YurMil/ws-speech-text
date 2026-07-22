@@ -1,4 +1,5 @@
 import { AUDIO_LIMITS, AudioPipelineError, type NormalizedAudio } from './limits';
+import { conditionForRecognition } from './speech';
 
 export function assertFiniteSamples(samples: Float32Array): void {
   for (let i = 0; i < samples.length; i += 1) {
@@ -119,11 +120,19 @@ export async function audioBufferToNormalized(
   }
 
   const { peak, rms } = analyzeLevels(samples);
-  if (rms < 0.001) {
-    warnings.push('Audio appears very quiet. Transcription quality may be poor.');
-  }
   if (peak >= 0.99) {
     warnings.push('Audio may be clipped.');
+  }
+
+  // Rumble out, level up. Dictaphone and phone recordings are routinely both
+  // quiet and full of handling noise, and the model has no gain control.
+  const { gain } = conditionForRecognition(samples);
+  clampSamples(samples);
+
+  if (rms < 0.001 && gain <= 1.01) {
+    warnings.push('Audio appears very quiet. Transcription quality may be poor.');
+  } else if (gain > 1.5) {
+    warnings.push(`Quiet recording — level raised ${gain.toFixed(1)}x before recognition.`);
   }
 
   return {

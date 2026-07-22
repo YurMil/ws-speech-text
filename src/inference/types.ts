@@ -141,6 +141,17 @@ export type ModelProfile = {
   chunkLengthSeconds: number;
   strideLengthSeconds: number;
   maxDurationSeconds: number;
+  /** Rough quality ordering, used to pick sensible defaults and to sort the menu. */
+  tier: 'tiny' | 'base' | 'small' | 'large';
+  /** Heavy profiles are hidden on mobile, where the tab would be killed loading them. */
+  desktopOnly?: boolean;
+  /**
+   * Downloads past this size ask for confirmation first — a user on a metered
+   * connection should not lose hundreds of megabytes to a mis-click.
+   */
+  confirmBeforeDownload?: boolean;
+  /** One line explaining who this profile is for. */
+  note: string;
 };
 
 export type AppError = {

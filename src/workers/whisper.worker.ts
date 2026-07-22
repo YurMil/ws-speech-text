@@ -370,12 +370,35 @@ async function handleTranscribe(
           ? 'russian'
           : 'english';
 
+    const profile = getProfile(request.profileId);
+
+    /*
+     * Decoding settings.
+     *
+     * Transformers.js does not expose Whisper's compression-ratio, logprob or
+     * no-speech thresholds, so the usual guards against degenerate output are
+     * not available. What it does expose is enough to prevent the common
+     * failure directly: `no_repeat_ngram_size` stops the model looping a phrase
+     * for the rest of a window, and a mild repetition penalty discourages it
+     * from starting. Anything that survives is caught in post-processing.
+     *
+     * Beam search is worth real quality on the larger profiles but multiplies
+     * the work, so it is reserved for the GPU path where there is headroom for
+     * it. WASM stays greedy — on a phone the alternative is not "slower", it is
+     * "the tab dies".
+     */
+    const useBeamSearch =
+      slot.effectiveRuntime === 'webgpu' && (profile?.tier === 'small' || profile?.tier === 'large');
+
     const raw = await slot.pipeline(request.audio, {
       ...(language ? { language } : {}),
       task: request.options.task,
       return_timestamps: request.options.timestamps === 'segment',
-      chunk_length_s: getProfile(request.profileId)?.chunkLengthSeconds ?? 30,
-      stride_length_s: getProfile(request.profileId)?.strideLengthSeconds ?? 5,
+      chunk_length_s: profile?.chunkLengthSeconds ?? 30,
+      stride_length_s: profile?.strideLengthSeconds ?? 5,
+      no_repeat_ngram_size: 6,
+      repetition_penalty: 1.1,
+      ...(useBeamSearch ? { num_beams: 3 } : {}),
     });
 
     if (isCancelled(request.requestId)) {

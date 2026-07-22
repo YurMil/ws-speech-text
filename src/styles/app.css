@@ -317,6 +317,13 @@ body {
   gap: 0.75rem;
 }
 
+.field-note {
+  margin: 0.35rem 0 0;
+  font-size: 0.8rem;
+  line-height: 1.4;
+  color: var(--md-on-surface-variant);
+}
+
 .settings-grid {
   display: grid;
   /* One column on a phone: at 160px the select truncates its own option text. */

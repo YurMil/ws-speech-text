@@ -13,6 +13,7 @@ import {
   getWindowSeconds,
   getOverlapSeconds,
 } from './limits';
+import { conditionForRecognition, findQuietestCut } from './speech';
 import {
   assertFiniteSamples,
   clampSamples,
@@ -212,12 +213,28 @@ export async function* iterateAudioWindows(
       throwIfAborted(options?.signal);
       const startSeconds = starts[index];
       const endSeconds = Math.min(startSeconds + windowSeconds, durationSeconds);
-      const samples = await collectNormalizedRange(sink, startSeconds, endSeconds, options?.signal);
+      let samples = await collectNormalizedRange(sink, startSeconds, endSeconds, options?.signal);
+      let effectiveEnd = endSeconds;
+
+      // Move the trailing edge to the nearest pause. A cut on a timer lands
+      // mid-word about as often as not, and the model then has to guess at half
+      // a syllable on both sides of the seam. Only the tail is moved, and never
+      // on the final window: whatever is trimmed here is already covered by the
+      // overlap of the window that follows.
+      const isLast = index === starts.length - 1;
+      if (!isLast && samples.length > AUDIO_LIMITS.targetSampleRate) {
+        const cut = findQuietestCut(samples, samples.length, 1.5);
+        if (cut > AUDIO_LIMITS.targetSampleRate && cut < samples.length) {
+          samples = samples.slice(0, cut);
+          effectiveEnd = startSeconds + cut / AUDIO_LIMITS.targetSampleRate;
+        }
+      }
+
       yield {
         index,
         total,
         startSeconds,
-        endSeconds,
+        endSeconds: effectiveEnd,
         samples,
       };
     }
@@ -264,6 +281,10 @@ async function collectNormalizedRange(
 
   const samples = concatFloat32(parts);
   assertFiniteSamples(samples);
+  clampSamples(samples);
+  // Same conditioning the inline path applies, so a long recording is not fed
+  // to the model at a different level than a short one would be.
+  conditionForRecognition(samples);
   clampSamples(samples);
   return samples;
 }
