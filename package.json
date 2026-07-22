@@ -1,7 +1,7 @@
 {
   "name": "ws-speech-text",
   "private": true,
-  "version": "0.1.0-prototype",
+  "version": "0.2.0",
   "type": "module",
   "description": "Client-side Whisper transcriber prototype",
   "scripts": {

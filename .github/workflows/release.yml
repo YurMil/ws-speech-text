@@ -1,13 +1,20 @@
 name: Release
 
-# Tag a release to publish the transcriber:
+# Publishes the transcriber to cadautoscript.com.
 #
-#   git tag v0.1.0 && git push origin v0.1.0
+# Runs automatically on every merge to main that touches the application, and
+# can also be driven by an explicit version tag:
 #
-# This builds the bundle, verifies it, attaches a checksummed archive to a
-# GitHub release, and notifies cadautoscript.com, which opens a pull request
-# republishing the artifact. The host never builds this app itself and never
-# downloads model weights.
+#   git tag v0.3.0 && git push origin v0.3.0
+#
+# Either way it builds the bundle, verifies it, attaches a checksummed archive
+# to a GitHub release and notifies the host, which republishes the artifact
+# behind a pull request. The host never builds this app and never downloads
+# model weights.
+#
+# Merges that only touch documentation or CI do not release — see the paths
+# filter. Without it every README fix would run the whole chain and raise
+# another pull request on the site.
 #
 # Required secret: SITE_DISPATCH_TOKEN — a fine-grained PAT scoped to
 # YurMil/cadautoscript.com with "Contents: read and write" permission, used
@@ -16,6 +23,15 @@ name: Release
 
 on:
   push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'index.html'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'vite.config.ts'
+      - 'tsconfig*.json'
+      - 'scripts/**'
     tags: ['v*']
   workflow_dispatch:
     inputs:
@@ -24,7 +40,9 @@ on:
         required: true
 
 concurrency:
-  group: release-${{ github.ref }}
+  # Serialised rather than cancelled: a half-published release is worse than a
+  # slow one, and each run uploads its own immutable archive.
+  group: release
   cancel-in-progress: false
 
 permissions:
@@ -38,7 +56,6 @@ jobs:
       # Read into env so the notify step can test it — the secrets context is
       # not available in step-level `if` conditions.
       SITE_DISPATCH_TOKEN: ${{ secrets.SITE_DISPATCH_TOKEN }}
-      TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -54,6 +71,24 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
+
+      - name: Resolve release tag
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.tag }}" ]; then
+            # Explicit re-release of an existing tag.
+            tag="${{ inputs.tag }}"
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+            tag="${{ github.ref_name }}"
+          else
+            # Merge to main. The package version names the release, and the run
+            # number keeps each build distinct without writing back to the
+            # repository — a version-bump commit would retrigger this workflow.
+            version="$(node -p "require('./package.json').version")"
+            tag="v${version}-build.${{ github.run_number }}"
+          fi
+          echo "TAG=${tag}" >> "$GITHUB_ENV"
+          echo "Releasing as ${tag}"
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -105,10 +140,18 @@ jobs:
               "$ARCHIVE" "$SHA256"
           } > release-notes.md
 
+          # Builds from a merge are marked prerelease so the hand-cut version
+          # tags stay easy to find among them.
+          prerelease=""
+          case "$TAG" in *-build.*) prerelease="--prerelease" ;; esac
+
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$ARCHIVE" "$ARCHIVE.sha256" --clobber
           else
+            # --target pins the tag to the commit that was built, not to
+            # whatever the default branch points at by the time this runs.
             gh release create "$TAG" "$ARCHIVE" "$ARCHIVE.sha256" \
+              --target "$GITHUB_SHA" $prerelease \
               --title "Whisper Transcriber $TAG" --notes-file release-notes.md
           fi
 

@@ -131,18 +131,28 @@ Model delivery uses the Hub with an immutable revision pinned in `src/inference/
 
 ## Release and publication pipeline
 
-Tagging a release publishes the utility end to end:
+**Merging to `main` publishes the utility.** No tag required:
 
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-1. `.github/workflows/release.yml` builds the bundle, runs `scripts/verify-artifact.mjs`, packages `whisper-transcriber-<tag>.zip`, and attaches it to a GitHub release together with its SHA-256.
-2. It then sends a `whisper-transcriber-release` `repository_dispatch` to `YurMil/cadautoscript.com` using the `SITE_DISPATCH_TOKEN` secret.
+1. `.github/workflows/release.yml` builds the bundle, runs `pnpm test` and `scripts/verify-artifact.mjs`, packages `whisper-transcriber-<tag>.zip` and attaches it to a GitHub release with its SHA-256.
+2. It sends a `whisper-transcriber-release` `repository_dispatch` to `YurMil/cadautoscript.com` using the `SITE_DISPATCH_TOKEN` secret.
 3. That repository's `sync-whisper-transcriber` workflow downloads the archive, refuses it unless the checksum matches, re-audits every file, republishes `static/utility-apps/whisper-transcriber/`, runs typecheck/lint/build, and opens a pull request.
 
-The host never builds this app and never downloads model weights. If the secret is absent the release still succeeds and the host sync can be started manually from its Actions tab with the tag.
+Nothing reaches production without that pull request being reviewed.
+
+### What triggers a release, and what does not
+
+Only merges that touch the application release — `src/`, `scripts/`, `index.html`, the package manifest, lockfile or build config. A README or workflow-only change does not, or every documentation fix would raise another pull request on the site.
+
+Automatic builds are tagged `v<version>-build.<run>` and marked as prereleases, so hand-cut versions stay easy to find among them. The run number, rather than a version bump committed back to the repository, is what keeps them distinct — writing to `main` from the workflow would retrigger it.
+
+For a named version, tag it explicitly:
+
+```bash
+git tag v0.3.0
+git push origin v0.3.0
+```
+
+The host never builds this app and never downloads model weights. If the secret is absent the release still succeeds, and the host sync can be started manually from its Actions tab with the tag.
 
 ### Artifact contents
 
