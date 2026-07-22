@@ -9,7 +9,8 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "typecheck": "tsc -b --pretty false",
-    "verify": "node scripts/verify-artifact.mjs"
+    "verify": "node scripts/verify-artifact.mjs",
+    "test": "vitest run"
   },
   "dependencies": {
     "@huggingface/transformers": "^3.7.2",
@@ -23,7 +24,8 @@
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",
     "typescript": "~5.8.3",
-    "vite": "^7.0.4"
+    "vite": "^7.0.4",
+    "vitest": "^4.1.10"
   },
   "packageManager": "pnpm@10.33.2",
   "engines": {

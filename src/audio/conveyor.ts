@@ -14,7 +14,8 @@ import {
   getOverlapSeconds,
 } from './limits';
 import { iterateAudioWindows } from './mediaProbe';
-import { analyzeLevels } from './normalize';
+import { containsSpeech } from './speech';
+import { finalizeTranscript, joinOverlappingText } from '../export/transcriptText';
 
 export type ConveyorProgress = {
   phase: 'extract' | 'infer' | 'merge';
@@ -70,13 +71,26 @@ function stitchSegments(
   return existing.concat(shifted);
 }
 
+/**
+ * Joins window transcripts, removing what the overlap transcribed twice.
+ *
+ * Windows deliberately overlap so no word is cut in half, which means every
+ * seam contains the same few seconds of speech from both sides. The timestamped
+ * path drops the duplicate by time; without timestamps the repeat has to be
+ * found in the words themselves.
+ */
 function joinTexts(parts: string[]): string {
   return parts
     .map((part) => part.trim())
     .filter(Boolean)
-    .join(' ')
+    .reduce((joined, part) => (joined ? joinOverlappingText(joined, part) : part), '')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+/** Same overlap problem, applied to the text carried by stitched segments. */
+function joinSegmentTexts(items: TranscriptSegment[]): string {
+  return joinTexts(items.map((segment) => segment.text));
 }
 
 /**
@@ -125,8 +139,12 @@ export async function transcribeMediaConveyor(
       message: `Transcribing window ${window.index + 1}/${window.total}…`,
     });
 
-    const { rms } = analyzeLevels(window.samples);
-    if (rms < 0.0004) {
+    // Whisper does not stay quiet when the audio is: given silence it invents
+    // text and repeats it to fill the window. Skipping speechless windows
+    // removes that failure mode instead of cleaning it up afterwards. The test
+    // is relative to the window's own level, so it still works on a quiet
+    // recording — the previous fixed threshold only caught digital silence.
+    if (!containsSpeech(window.samples)) {
       options.onChunkProgress?.({
         phase: 'merge',
         chunkIndex: window.index,
@@ -134,7 +152,7 @@ export async function transcribeMediaConveyor(
         windowStartSeconds: window.startSeconds,
         windowEndSeconds: window.endSeconds,
         ratio: window.total ? (window.index + 1) / window.total : 1,
-        message: `Skipped quiet window ${window.index + 1}/${window.total}`,
+        message: `No speech in window ${window.index + 1}/${window.total} — skipped`,
       });
       await yieldToMain();
       continue;
@@ -176,10 +194,12 @@ export async function transcribeMediaConveyor(
     );
 
     const partial: TranscriptResult = {
+      // Partials stay unparagraphed: reflowing the text on every window would
+      // make it jump around while the user is reading it.
       text:
         options.timestamps === 'none'
           ? joinTexts(textParts)
-          : segments.map((segment) => segment.text).join(' ').trim() || joinTexts(textParts),
+          : joinSegmentTexts(segments) || joinTexts(textParts),
       segments: options.timestamps === 'none' ? [] : segments,
       durationSeconds,
       warnings: [...warnings],
@@ -201,7 +221,7 @@ export async function transcribeMediaConveyor(
 
   if (options.timestamps === 'none') {
     return {
-      text: joinTexts(textParts),
+      text: finalizeTranscript(joinTexts(textParts)),
       segments: [],
       durationSeconds,
       warnings,
@@ -209,7 +229,7 @@ export async function transcribeMediaConveyor(
   }
 
   return {
-    text: segments.map((segment) => segment.text).join(' ').trim() || joinTexts(textParts),
+    text: finalizeTranscript(joinSegmentTexts(segments) || joinTexts(textParts)),
     segments,
     durationSeconds,
     warnings,
